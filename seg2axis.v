@@ -5,7 +5,6 @@
 `default_nettype none
 
 /*
- * Author：Yuri-Nakamura
  * Segmented Interface to AXI stream
  */
 module seg2axis #(
@@ -35,6 +34,8 @@ module seg2axis #(
     output wire                          axis_tuser,
     output wire  [KEEP_WIDTH-1:0]        axis_tkeep
 );
+    localparam BUFFER_MASK = (1 << BUFFER_ADDR_WIDTH) - 1;
+
     reg [DATA_WIDTH-1:0] s_axis_tdata = 0;  //between buffer & FIFO
     reg [KEEP_WIDTH-1:0] s_axis_tkeep = 0;
     //wire [KEEP_WIDTH-1:0] in_axis_tkeep;
@@ -47,7 +48,7 @@ module seg2axis #(
     reg [BUFFER_ADDR_WIDTH-1:0] pktstr_ptr;    //start pointer of 
     reg [BUFFER_ADDR_WIDTH-1:0] pktend_ptr;    //identify 16 EOFs
     reg [BUFFER_ADDR_WIDTH-1:0] valid_seg_in_buffer = 0;
-    reg [7:0] d, e;
+    //reg [7:0] e;
 
     reg last_cycle_last_seg_inframe;  //seg 15 of last frame is full
 
@@ -58,9 +59,9 @@ module seg2axis #(
     wire s_axis_tready; //FIFO input ready
     //wire axis_tready = 0;// do not input tready now
     
-    integer a, b, c;
+    integer a, b, c, d, e;
 
-    assign rx_mac_ready = (pktstr_ptr - pktend_ptr > 2*BUFFER_ADDR_WIDTH'(SEG_WIDTH) || pktstr_ptr == pktend_ptr) ? 1 : 0;//to do
+    assign rx_mac_ready = (pktstr_ptr - pktend_ptr > 2*SEG_WIDTH || pktstr_ptr == pktend_ptr) ? 1 : 0;//to do
     //assign in_axis_tkeep = s_axis_tkeep;
     //assign s_axis_tvalid = (frag_active && frag_pkt_len > 0);
     //assign s_axis_tvalid = (packet_deposited && frag_pkt_len > 0);
@@ -75,9 +76,9 @@ module seg2axis #(
                 buffer_data[a] <= 64'd0;
                 buffer_keep[a] <= 8'd0;
             end
-            buffer_last <= 256'd0;
-            buffer_user <= 256'd0;
-            pktend_ptr <= 8'd0;
+            buffer_last <= 0;
+            buffer_user <= 0;
+            pktend_ptr <= 0;
         end
         else
         begin
@@ -89,17 +90,17 @@ module seg2axis #(
                     //send valid segment and EOF into buffer
                     if(rx_mac_inframe[b] || (b>0 && rx_mac_inframe[b-1]) || (b==0 && last_cycle_last_seg_inframe))
                     begin
-                        buffer_data[pktend_ptr+e] <= rx_mac_data[64*b+:64];
-                        buffer_keep[pktend_ptr+e] <= rx_mac_inframe[b] ? 8'hFF : (8'hFF >> rx_mac_eop_empty[3*b+:3]);
-                        buffer_last[pktend_ptr+e] <= !rx_mac_inframe[b];
-                        buffer_user[pktend_ptr+e] <= |rx_mac_error[2*b+:2] || rx_mac_fcs_error[b];
+                        buffer_data[(pktend_ptr+e) & BUFFER_MASK] <= rx_mac_data[64*b+:64];
+                        buffer_keep[(pktend_ptr+e) & BUFFER_MASK] <= rx_mac_inframe[b] ? 8'hFF : (8'hFF >> rx_mac_eop_empty[3*b+:3]);
+                        buffer_last[(pktend_ptr+e) & BUFFER_MASK] <= !rx_mac_inframe[b];
+                        buffer_user[(pktend_ptr+e) & BUFFER_MASK] <= |rx_mac_error[2*b+:2] || rx_mac_fcs_error[b];
                         e = e + 1;
                     end
                     else
                     ;
                 end
                 last_cycle_last_seg_inframe <= rx_mac_inframe[SEG_WIDTH-1];
-                pktend_ptr <= pktend_ptr + e;
+                pktend_ptr <= (pktend_ptr+e) & BUFFER_MASK;
             end
         end
     end
@@ -108,24 +109,22 @@ module seg2axis #(
     begin
         first_eof_seg = 0;
         valid_seg_in_buffer = pktend_ptr - pktstr_ptr;
-        if(valid_seg_in_buffer <= SEG_WIDTH)    //buffer almost empty
+        for(d = 0; d < SEG_WIDTH; d = d + 1)
         begin
-            for(d = 0; d < valid_seg_in_buffer; d = d + 1)
+            if(valid_seg_in_buffer <= SEG_WIDTH && d < valid_seg_in_buffer)
             begin
-                if(buffer_last[pktstr_ptr+valid_seg_in_buffer-BUFFER_ADDR_WIDTH'(1)-BUFFER_ADDR_WIDTH'(d)])
+                if(buffer_last[(pktstr_ptr+valid_seg_in_buffer-1-d) & BUFFER_MASK])
                 first_eof_seg = valid_seg_in_buffer-d;
             end
-        end
-        else
-        begin
-            for(d = 0; d < SEG_WIDTH; d = d + 1)    //buffer not almost empty
+            else if(valid_seg_in_buffer > SEG_WIDTH)
             begin
-                //if(buffer_last[pktstr_ptr+8'd16-8'd1-d])
-                if(buffer_last[pktstr_ptr+BUFFER_ADDR_WIDTH'(SEG_WIDTH)-BUFFER_ADDR_WIDTH'(1)-BUFFER_ADDR_WIDTH'(d)])
+                if(buffer_last[(pktstr_ptr+SEG_WIDTH-1-d) & BUFFER_MASK])
                 first_eof_seg = SEG_WIDTH-d;
             end
+            else ;
         end
     end
+
 
     //packet from buffer to FIFO
     always@(posedge clk or posedge rst)
@@ -141,14 +140,14 @@ module seg2axis #(
         end
         else
         begin
-            if(pktend_ptr - pktstr_ptr < 8'd16 && first_eof_seg == 0)//almost empty and no EOF
+            if(pktend_ptr - pktstr_ptr < SEG_WIDTH && first_eof_seg == 0)//almost empty and no EOF
             s_axis_tvalid <= 0;//no dot extract buffer
             else if(first_eof_seg == 0)//not almost empty & all middle segments
             begin
                 s_axis_tvalid <= 1;
                 for(c = 0; c <= SEG_WIDTH-1; c = c + 1)
                 begin
-                    s_axis_tdata[c*64+:64] <= buffer_data[pktstr_ptr+BUFFER_ADDR_WIDTH'(c)] & {{8{buffer_keep[pktstr_ptr][7]}},
+                    s_axis_tdata[c*64+:64] <= buffer_data[(pktstr_ptr+c) & BUFFER_MASK] & {{8{buffer_keep[pktstr_ptr][7]}},
                                                                             {8{buffer_keep[pktstr_ptr][6]}},
                                                                             {8{buffer_keep[pktstr_ptr][5]}},
                                                                             {8{buffer_keep[pktstr_ptr][4]}},
@@ -156,7 +155,7 @@ module seg2axis #(
                                                                             {8{buffer_keep[pktstr_ptr][2]}},
                                                                             {8{buffer_keep[pktstr_ptr][1]}},
                                                                             {8{buffer_keep[pktstr_ptr][0]}}};
-                    s_axis_tkeep[c*8+:8] <= buffer_keep[pktstr_ptr+BUFFER_ADDR_WIDTH'(c)];
+                    s_axis_tkeep[c*8+:8] <= buffer_keep[(pktstr_ptr+c) & BUFFER_MASK];
                 end
                 s_axis_tlast <= 0;
                 s_axis_tuser <= 0;
@@ -171,7 +170,7 @@ module seg2axis #(
                     begin
                         if(c < first_eof_seg)
                         begin
-                        s_axis_tdata[c*64+:64] <= buffer_data[pktstr_ptr+BUFFER_ADDR_WIDTH'(c)] & {{8{buffer_keep[pktstr_ptr][7]}},
+                        s_axis_tdata[c*64+:64] <= buffer_data[(pktstr_ptr+c) & BUFFER_MASK] & {{8{buffer_keep[pktstr_ptr][7]}},
                                                                                 {8{buffer_keep[pktstr_ptr][6]}},
                                                                                 {8{buffer_keep[pktstr_ptr][5]}},
                                                                                 {8{buffer_keep[pktstr_ptr][4]}},
@@ -179,16 +178,16 @@ module seg2axis #(
                                                                                 {8{buffer_keep[pktstr_ptr][2]}},
                                                                                 {8{buffer_keep[pktstr_ptr][1]}},
                                                                                 {8{buffer_keep[pktstr_ptr][0]}}};
-                        s_axis_tkeep[c*8+:8] <= buffer_keep[pktstr_ptr+BUFFER_ADDR_WIDTH'(c)];
+                        s_axis_tkeep[c*8+:8] <= buffer_keep[(pktstr_ptr+c) & BUFFER_MASK];
                         end
                         else
                         begin
-                            s_axis_tdata[c*64+:64] = 0;
-                            s_axis_tkeep[c*8+:8] = 0;
+                            s_axis_tdata[c*64+:64] <= 0;
+                            s_axis_tkeep[c*8+:8] <= 0;
                         end
                     end
-                    s_axis_tlast <= buffer_last[pktstr_ptr+first_eof_seg-BUFFER_ADDR_WIDTH'(1)];
-                    s_axis_tuser <= buffer_user[pktstr_ptr+first_eof_seg-BUFFER_ADDR_WIDTH'(1)];
+                    s_axis_tlast <= buffer_last[(pktstr_ptr+first_eof_seg-1) & BUFFER_MASK];
+                    s_axis_tuser <= buffer_user[(pktstr_ptr+first_eof_seg-1) & BUFFER_MASK];
                     pktstr_ptr <= pktstr_ptr + first_eof_seg;
             end
             end
