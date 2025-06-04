@@ -5,7 +5,7 @@
 `default_nettype none
 
 /*
- * Author：Yuri-Nakamura
+ * Author：sunyq
  * AXI stream to Segmented Interface
  */
 module axis2seg #(
