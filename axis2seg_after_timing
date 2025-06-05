@@ -1,0 +1,156 @@
+// Language: Verilog 2001
+
+`resetall
+`timescale 1ns / 1ps
+`default_nettype none
+
+/*
+ * Author：sunyq
+ * AXI stream to Segmented Interface
+ */
+module axis2seg #(
+    parameter DATA_WIDTH = 1024,
+    parameter KEEP_WIDTH = DATA_WIDTH/8,
+    parameter SEG_WIDTH = KEEP_WIDTH/8,
+    parameter SKIP_CRC = 0
+)
+(
+    input  wire         clk,
+    input  wire         rst,
+
+    // AXIS interface
+    input  wire [DATA_WIDTH-1:0]  axis_tdata,
+    input  wire                   axis_tvalid,
+    output wire                   axis_tready,
+    input  wire                   axis_tlast,
+    input  wire                   axis_tuser,
+    input  wire [KEEP_WIDTH-1:0]  axis_tkeep,
+
+    // MAC segmented interface
+    output wire  [DATA_WIDTH-1:0]  tx_mac_data,
+    output wire                   tx_mac_valid,
+    input  wire                   tx_mac_ready,
+    output wire  [SEG_WIDTH-1:0]   tx_mac_inframe,
+    output wire  [3*SEG_WIDTH-1:0] tx_mac_eop_empty,
+    output wire  [SEG_WIDTH-1:0]   tx_mac_error,
+    output wire  [SEG_WIDTH-1:0]   tx_mac_skip_crc //optional
+);
+
+reg [DATA_WIDTH-1:0] tx_mac_data_reg;
+reg                  tx_mac_valid_reg;
+reg [SEG_WIDTH-1:0] tx_mac_inframe_reg;
+reg [3*SEG_WIDTH-1:0] tx_mac_eop_empty_reg;
+reg [SEG_WIDTH-1:0] tx_mac_error_reg;
+//reg [SEG_WIDTH-1:0] tx_mac_skip_crc_reg;
+reg [2:0] count_table [0:255];
+reg [2:0] bitcount;
+
+integer i, j;
+
+assign tx_mac_data  = tx_mac_data_reg;
+assign tx_mac_valid = tx_mac_valid_reg;
+//assign axis_tready  = tx_mac_ready;   //for implementation
+assign axis_tready = 1; //for simulation
+assign tx_mac_inframe = tx_mac_inframe_reg;
+assign tx_mac_eop_empty = tx_mac_eop_empty_reg;
+assign tx_mac_error = tx_mac_error_reg;
+assign tx_mac_skip_crc = 0;
+
+//initialize 
+initial begin
+    integer a, b;
+    for(a = 0; a < 256; a = a + 1)
+    begin
+        if(a == 8'h00 || a == 8'hFF)
+        count_table[a] = 3'd0;
+        else
+        begin
+            bitcount = 0;
+            for(b = 0; b < 8; b = b + 1)
+            bitcount = bitcount + (~a[b]);
+            count_table[a] = bitcount[2:0];
+        end
+    end
+end
+
+//tx_mac_data
+always@(posedge clk or posedge rst)
+begin
+    if(rst)
+    begin
+        tx_mac_data_reg <= 0;
+    end
+    else if(axis_tvalid && axis_tready)
+    begin
+        tx_mac_data_reg <= axis_tdata;
+    end
+end
+
+//tx_mac_valid
+always@(posedge clk or posedge rst)
+begin
+    if(rst)
+    begin
+        tx_mac_valid_reg <= 0;
+    end
+    else if(axis_tready)
+    begin
+        tx_mac_valid_reg <= axis_tvalid;
+    end
+end
+
+//tx_mac_inframe & tx_mac_eop_empty
+always@(posedge clk or posedge rst)
+begin
+    if(rst)
+    begin
+        tx_mac_inframe_reg <= 0;
+        tx_mac_eop_empty_reg <= 0;
+    end
+    else if(axis_tvalid && axis_tready)
+    begin
+        for(i = 0; i < SEG_WIDTH; i = i + 1)
+        begin
+            if(~|axis_tkeep[i*8+:8])    //invalid seg
+            begin
+                tx_mac_inframe_reg[i] <= 0;
+                tx_mac_eop_empty_reg[3*i+:3] <= 0;
+            end
+            else 
+            begin
+                tx_mac_eop_empty_reg[3*i+:3] <= count_table[axis_tkeep[i*8+:8]];
+                if(i < SEG_WIDTH - 1)  //except the last seg
+                tx_mac_inframe_reg[i] <= |axis_tkeep[(i+1)*8+:8];
+                else if(i == SEG_WIDTH - 1) //last seg in a frame
+                tx_mac_inframe_reg[i] <= !axis_tlast && |axis_tkeep[i*8+:8];
+            end
+        end
+    end
+end
+
+//tx_mac_error
+always@(posedge clk or posedge rst)
+begin
+    if(rst)
+    begin
+        tx_mac_error_reg <= 0;
+    end
+    else if(axis_tvalid && axis_tready && axis_tlast)
+    begin
+        for(j = 0; j < SEG_WIDTH; j = j + 1)
+        begin
+            if(~|axis_tkeep[j*8+:8])
+            tx_mac_error_reg[j] <= 0;
+            else if(j < SEG_WIDTH - 1)
+            tx_mac_error_reg[j] <= axis_tuser && ~|axis_tkeep[(j+1)*8+:8];
+            else if(j == SEG_WIDTH - 1)
+            tx_mac_error_reg[j] <= axis_tuser;
+        end
+    end
+    else
+    tx_mac_error_reg <= 0;
+end
+
+endmodule
+
+`resetall
